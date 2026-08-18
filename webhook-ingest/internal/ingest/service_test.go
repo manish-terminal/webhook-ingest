@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,4 +108,69 @@ func TestRecordingProcessed_BackgroundContext(t *testing.T) {
 		t.Fatalf("expected recording_processed to be true for call %s", callID)
 	}
 }
+
+func TestConcurrentDuplicateEvents_NoDoubleCounting(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+
+	body := eventJSON(eventID, callID, accountID)
+	const concurrentRequests = 10
+
+	var wg sync.WaitGroup
+	for i := 0; i < concurrentRequests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = post(t, srv.URL+"/webhooks/calls", body)
+		}()
+	}
+	wg.Wait()
+
+	// Verify exact 1 event was stored
+	var eventCount int
+	err := st.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM events WHERE event_id = $1`, eventID).Scan(&eventCount)
+	if err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("stored %d event records for %s, want 1", eventCount, eventID)
+	}
+
+	// Verify account stats call_count is exactly 1 (not 10!)
+	statsResult, err := st.AccountStats(context.Background(), accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if statsResult.CallCount != 1 {
+		t.Fatalf("account %s call_count = %d, want 1", accountID, statsResult.CallCount)
+	}
+}
+
+func TestDifferentEventsSameCall_NoDoubleCounting(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	_, callID, accountID := testutil.IDs(t, st)
+
+	body1 := eventJSON("evt_retry_1", callID, accountID)
+	resp1 := post(t, srv.URL+"/webhooks/calls", body1)
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp1.StatusCode)
+	}
+
+	body2 := eventJSON("evt_retry_2", callID, accountID)
+	resp2 := post(t, srv.URL+"/webhooks/calls", body2)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp2.StatusCode)
+	}
+
+	statsResult, err := st.AccountStats(context.Background(), accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if statsResult.CallCount != 1 {
+		t.Fatalf("account %s call_count = %d, want 1 for single call_id", accountID, statsResult.CallCount)
+	}
+}
+
+
 

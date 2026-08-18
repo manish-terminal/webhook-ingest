@@ -72,3 +72,55 @@ if rec.RecordingURL != "" {
 
 2. We added structured error logging (`s.log.Error(...)`) so any background failures are properly reported.
 
+---
+
+## Fix 3: Duplicate Call Records & Account Call Count Drift (Idempotency Enforcement)
+
+### 1. What Was Happening
+Operations reported that duplicate call records were appearing in the dashboard and account call-counts were drifting higher than the actual number of unique calls.
+
+### 2. Why It Was Happening
+1. **Schema Defect**: `migrations/001_init.sql` indexed `event_id` but lacked a `UNIQUE` constraint on `events(event_id)`.
+2. **Race Condition in `Ingest()`**: When identical `event_id` webhooks arrived concurrently, both executed `s.store.EventExists(event_id)`. Both received `false`, inserted duplicate events, and incremented `account_stats.call_count` twice.
+3. **Call Count Drifting**: When multiple webhooks arrived for the *same* `call_id` (e.g., status retries or updates), `s.store.IncrementAccountStats()` incremented `account_stats.call_count` for every *event* rather than only for *new unique calls*.
+
+### 3. How It Was Fixed
+1. **New Migration** ([`migrations/002_unique_event_id.sql`](file:///Users/manishgupta/Documents/webhook-ingest/webhook-ingest/migrations/002_unique_event_id.sql)):
+   Added a `UNIQUE` index on `events(event_id)`:
+   ```sql
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id_unique ON events (event_id);
+   ```
+
+2. **Atomic DB Deduplication** ([`internal/store/store.go:76`](file:///Users/manishgupta/Documents/webhook-ingest/webhook-ingest/internal/store/store.go#L76)):
+   Updated `InsertEvent` to use `ON CONFLICT (event_id) DO NOTHING` and return `(inserted bool, err error)`:
+   ```go
+   func (s *Store) InsertEvent(ctx context.Context, e Event) (bool, error) {
+       tag, err := s.pool.Exec(ctx,
+           `INSERT INTO events (event_id, call_id, account_id, payload)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (event_id) DO NOTHING`,
+           e.EventID, e.CallID, e.AccountID, e.Payload)
+       if err != nil { return false, err }
+       return tag.RowsAffected() > 0, nil
+   }
+   ```
+
+3. **New Call Detection** ([`internal/store/store.go:88`](file:///Users/manishgupta/Documents/webhook-ingest/webhook-ingest/internal/store/store.go#L88)):
+   Updated `UpsertCall` to use PostgreSQL's `RETURNING (xmax = 0) AS is_new` idiom to detect whether a brand-new call row was created:
+   ```go
+   func (s *Store) UpsertCall(ctx context.Context, e Event) (bool, error) {
+       var isNew bool
+       err := s.pool.QueryRow(ctx,
+           `INSERT INTO calls (call_id, account_id, status, duration_sec, recording_url, updated_at)
+            VALUES ($1, $2, $3, $4, $5, now())
+            ON CONFLICT (call_id) DO UPDATE SET ...
+            RETURNING (xmax = 0) AS is_new`, ...).Scan(&isNew)
+       return isNew, err
+   }
+   ```
+
+4. **Service Wiring** ([`internal/ingest/service.go:64-77`](file:///Users/manishgupta/Documents/webhook-ingest/webhook-ingest/internal/ingest/service.go#L64-L77)):
+   In `Ingest()`, if `InsertEvent` reports `!inserted`, the duplicate webhook is ignored immediately (`return nil`). `IncrementAccountStats` and `cache.Record` are ONLY executed if `isNewCall == true`.
+
+
+

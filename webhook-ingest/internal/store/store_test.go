@@ -26,7 +26,7 @@ func TestInsertEventThenExists(t *testing.T) {
 		t.Fatal("expected event to be absent before insert")
 	}
 
-	if err := s.InsertEvent(ctx, evt); err != nil {
+	if _, err := s.InsertEvent(ctx, evt); err != nil {
 		t.Fatalf("InsertEvent: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestUpsertCallThenMarkRecordingProcessed(t *testing.T) {
 		Status: "completed", DurationSec: 10,
 		RecordingURL: "https://example.com/a.wav", Payload: []byte(`{}`),
 	}
-	if err := s.UpsertCall(ctx, evt); err != nil {
+	if _, err := s.UpsertCall(ctx, evt); err != nil {
 		t.Fatalf("UpsertCall: %v", err)
 	}
 	if err := s.MarkRecordingProcessed(ctx, callID); err != nil {
