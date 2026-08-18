@@ -16,7 +16,10 @@ func NewRouter(svc *ingest.Service, log *slog.Logger) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	//health endpoint
 	mux.HandleFunc("POST /webhooks/calls", h.postCallWebhook)
+	//webhook endpoint
 	mux.HandleFunc("GET /accounts/{account_id}/stats", h.getAccountStats)
+	//stats endpoint
 	return mux
 }
