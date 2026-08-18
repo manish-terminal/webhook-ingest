@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
@@ -82,3 +83,28 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
 	}
 }
+
+func TestRecordingProcessed_BackgroundContext(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+
+	body := eventJSON(eventID, callID, accountID)
+	resp := post(t, srv.URL+"/webhooks/calls", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	// Wait for background recording processing (50ms sleep in service.go)
+	time.Sleep(150 * time.Millisecond)
+
+	var processed bool
+	err := st.Pool().QueryRow(context.Background(),
+		`SELECT recording_processed FROM calls WHERE call_id = $1`, callID).Scan(&processed)
+	if err != nil {
+		t.Fatalf("query recording_processed: %v", err)
+	}
+	if !processed {
+		t.Fatalf("expected recording_processed to be true for call %s", callID)
+	}
+}
+
