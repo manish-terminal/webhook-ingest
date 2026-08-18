@@ -77,6 +77,7 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		go func() {
 			if err := s.processRecording(ctx, rec); err != nil {
 				// TODO: handle
+				s.log.Error("recording processing failed", "event_id", rec.EventID, "call_id", rec.CallID, "err", err)
 			}
 		}()
 	}
